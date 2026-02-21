@@ -1,0 +1,34 @@
+# Performance Characteristics
+
+## {{ service_name }}
+
+### Performance Targets
+
+- **Throughput**: 1000 req/sec per replica
+- **Latency** (p50): < 50ms
+- **Latency** (p99): < 200ms
+- **Availability**: 99.9%
+
+### Resource Usage
+
+- **CPU**: {{ config.kubernetes.resource_requests_cpu }} (request), {{ config.kubernetes.resource_limits_cpu }} (limit)
+- **Memory**: {{ config.kubernetes.resource_requests_memory }} (request), {{ config.kubernetes.resource_limits_memory }} (limit)
+- **Connections**: {{ config.database.connection_pool_size }} database connections
+
+### Scaling Characteristics
+
+- **Horizontal Scaling**: Linear up to 20 replicas
+- **Scale Out Trigger**: CPU > {{ config.kubernetes.target_cpu_utilization }}%
+- **Scale In Delay**: 5 minutes stabilization
+
+### Bottlenecks
+
+1. Database connection pool ({{ config.database.connection_pool_size }} connections)
+2. Rate limiting ({{ config.security.rate_limit_per_minute }} req/min per client)
+
+### Optimization Notes
+
+- Use connection pooling
+- Cache frequently accessed data
+- Use async I/O for external calls
+- Database indexes on query fields

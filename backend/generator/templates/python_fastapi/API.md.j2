@@ -1,0 +1,109 @@
+# API Documentation
+
+## {{ service_name }} API Reference
+
+**Base URL**: `{{ config.metadata.api_prefix }}`
+
+## Authentication
+
+{% if config.security.auth_type.value in ["api_key", "both"] -%}
+### API Key
+
+Include in header:
+```
+{{ config.security.api_key_header }}: your-api-key
+```
+{% endif -%}
+
+{% if config.security.auth_type.value in ["jwt", "both"] -%}
+### JWT Token
+
+Include in header:
+```
+Authorization: Bearer your-jwt-token
+```
+{% endif -%}
+
+## Endpoints
+
+### Health Checks
+
+#### GET /health
+Basic health check
+
+#### GET /health/ready
+Readiness check for load balancer
+
+#### GET /health/live
+Liveness check for Kubernetes
+
+### Items API
+
+#### GET {{ config.metadata.api_prefix }}/items
+List all items with pagination
+
+**Parameters:**
+- `page` (int): Page number (default: 1)
+- `page_size` (int): Items per page (default: 20, max: 100)
+
+**Response:** 200 OK
+```json
+{
+  "items": [...],
+  "total": 100,
+  "page": 1,
+  "page_size": 20,
+  "total_pages": 5
+}
+```
+
+#### POST {{ config.metadata.api_prefix }}/items
+Create a new item
+
+**Request Body:**
+```json
+{
+  "name": "Item Name",
+  "description": "Optional description"
+}
+```
+
+**Response:** 201 Created
+
+#### GET {{ config.metadata.api_prefix }}/items/{item_id}
+Get a specific item
+
+**Response:** 200 OK
+
+#### PUT {{ config.metadata.api_prefix }}/items/{item_id}
+Update an item
+
+**Response:** 200 OK
+
+#### DELETE {{ config.metadata.api_prefix }}/items/{item_id}
+Delete an item
+
+**Response:** 204 No Content
+
+## Error Responses
+
+All errors follow this format:
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "Human-readable message"
+  }
+}
+```
+
+### Error Codes
+
+- `VALIDATION_ERROR` (400): Invalid request data
+- `AUTHENTICATION_ERROR` (401): Authentication required or failed
+- `AUTHORIZATION_ERROR` (403): Insufficient permissions
+- `NOT_FOUND` (404): Resource not found
+- `CONFLICT` (409): Resource conflict (e.g., duplicate)
+- `RATE_LIMIT_EXCEEDED` (429): Too many requests
+- `INTERNAL_ERROR` (500): Server error
+- `DATABASE_ERROR` (500): Database operation failed

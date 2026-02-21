@@ -1,0 +1,84 @@
+# Security
+
+## {{ service_name }} - Security Documentation
+
+### Authentication
+
+**Method**: {{ config.security.auth_type.value }}
+
+{% if config.security.auth_type.value in ["api_key", "both"] -%}
+#### API Key Security
+
+- API keys stored in Kubernetes secrets
+- Constant-time comparison prevents timing attacks
+- Keys rotated quarterly
+- Failed attempts logged and monitored
+{% endif -%}
+
+{% if config.security.auth_type.value in ["jwt", "both"] -%}
+#### JWT Security
+
+- Tokens expire after {{ config.security.jwt_expiry_hours }} hours
+- Signature verification required
+- Clock skew tolerance: 10 seconds
+- Issuer validation enforced
+{% endif -%}
+
+### Authorization
+
+{% if config.security.enable_rbac -%}
+- Role-Based Access Control (RBAC)
+- Roles: Viewer, Editor, Admin
+- Deny-by-default policy
+{% else -%}
+- Authenticated users have full access
+- Consider implementing RBAC for production
+{% endif -%}
+
+### Rate Limiting
+
+- {{ config.security.rate_limit_per_minute }} requests/minute per client
+- Burst allowance: {{ config.security.rate_limit_burst }}
+- Token bucket algorithm
+- Per-IP and per-user tracking
+
+### Input Validation
+
+- Pydantic schema validation
+- Max request body size: 1MB
+- Unknown fields rejected
+- SQL injection prevention
+- XSS prevention
+
+### Network Security
+
+- TLS 1.3 required in production
+- NetworkPolicy restricts pod communication
+- Egress filtering enabled
+- Internal services not exposed
+
+### Secrets Management
+
+- Secrets stored in Kubernetes Secrets
+- Never logged or exposed in errors
+- Rotated regularly
+- Access audited
+
+### Security Scanning
+
+- Dependency vulnerability scanning (Trivy)
+- Container image scanning
+- Secret scanning (Gitleaks)
+- SAST with Bandit
+- Critical vulnerabilities block deployment
+
+### Compliance
+
+- Audit logging enabled
+- Data encryption at rest
+- TLS encryption in transit
+- No PII in logs
+
+### Security Contacts
+
+Report security issues to: security@example.com
