@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ service_name }}-config
+  namespace: default
+data:
+  SERVICE_NAME: "{{ service_name }}"
+  VERSION: "{{ version }}"
+  PORT: "{{ port }}"
+  API_PREFIX: "{{ config.metadata.api_prefix }}"
+  LOG_LEVEL: "{{ config.observability.log_level }}"
+  ENABLE_METRICS: "{{ config.observability.enable_prometheus | lower }}"
+  ENABLE_TRACING: "{{ config.observability.enable_tracing | lower }}"
+  RATE_LIMIT_PER_MINUTE: "{{ config.security.rate_limit_per_minute }}"
+  RATE_LIMIT_BURST: "{{ config.security.rate_limit_burst }}"
+  {% if config.database.database_type.value == "mongodb" -%}
+  DATABASE_NAME: "{{ service_name_snake }}"
+  {% endif -%}
