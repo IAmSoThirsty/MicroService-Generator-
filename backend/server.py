@@ -71,6 +71,88 @@ async def get_status_checks():
     
     return status_checks
 
+
+# ==================== MICROSERVICE GENERATOR ENDPOINTS ====================
+
+generator = MicroserviceGenerator()
+
+
+@api_router.post("/generate")
+async def generate_microservice(config: MicroserviceConfig):
+    """
+    Generate a complete production-ready microservice
+    
+    Returns a ZIP file containing all generated code and configuration
+    """
+    try:
+        logger.info(f"Generating microservice: {config.metadata.name}")
+        
+        # Generate microservice
+        zip_bytes = generator.generate(config)
+        
+        logger.info(f"Successfully generated microservice: {config.metadata.name}")
+        
+        # Return ZIP file
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename={config.metadata.name}.zip"
+            }
+        )
+    
+    except Exception as e:
+        logger.error(f"Failed to generate microservice: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.get("/generator/info")
+async def generator_info():
+    """Get information about the generator"""
+    return {
+        "name": "Maximal Microservice Generator",
+        "version": "1.0.0",
+        "supported_languages": [
+            {
+                "id": "python_fastapi",
+                "name": "Python + FastAPI",
+                "status": "available"
+            },
+            {
+                "id": "go_fiber",
+                "name": "Go + Fiber",
+                "status": "coming_soon"
+            },
+            {
+                "id": "nodejs_nestjs",
+                "name": "Node.js + NestJS",
+                "status": "coming_soon"
+            },
+            {
+                "id": "rust_actix",
+                "name": "Rust + Actix",
+                "status": "coming_soon"
+            }
+        ],
+        "features": [
+            "Full CI/CD pipeline (GitHub Actions + GitLab CI)",
+            "Complete Kubernetes manifests (Deployment, Service, HPA, PDB, NetworkPolicy)",
+            "Prometheus metrics with proper cardinality control",
+            "Health checks (liveness, readiness, startup)",
+            "Security (Authentication, Authorization, Rate Limiting)",
+            "Database migrations and management scripts",
+            "Comprehensive documentation",
+            "Failure mode matrix",
+            "SBOM generation",
+            "Container image signing",
+            "85%+ test coverage requirement",
+            "Security scanning (Trivy, Bandit, Gitleaks)",
+            "Structured JSON logging",
+            "Graceful shutdown",
+            "Zero-downtime deployments"
+        ]
+    }
+
 # Include the router in the main app
 app.include_router(api_router)
 
