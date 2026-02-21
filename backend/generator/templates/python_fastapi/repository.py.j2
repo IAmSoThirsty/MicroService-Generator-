@@ -1,0 +1,291 @@
+"""
+Repository layer - Database abstraction
+"""
+import asyncio
+from typing import List, Tuple, Optional, Dict, Any
+from uuid import UUID
+from datetime import datetime
+
+{% if config.database.database_type.value == "postgresql" -%}
+import asyncpg
+from asyncpg.pool import Pool
+{% elif config.database.database_type.value == "mongodb" -%}
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+{% elif config.database.database_type.value == "redis" -%}
+import aioredis
+{% endif -%}
+
+from .config import settings
+from .models import Item
+from .errors import DatabaseError
+from .logging_config import logger
+from .metrics import DB_CONNECTIONS_ACTIVE, DB_QUERY_DURATION, DB_ERRORS
+import time
+
+
+class Database:
+    """Database connection manager"""
+    
+    def __init__(self):
+        {% if config.database.database_type.value == "postgresql" -%}
+        self.pool: Optional[Pool] = None
+        {% elif config.database.database_type.value == "mongodb" -%}
+        self.client: Optional[AsyncIOMotorClient] = None
+        self.db: Optional[AsyncIOMotorDatabase] = None
+        {% elif config.database.database_type.value == "redis" -%}
+        self.redis: Optional[aioredis.Redis] = None
+        {% elif config.database.database_type.value == "in_memory" -%}
+        self.data: Dict[str, Any] = {}
+        self.connected = False
+        {% endif -%}
+    
+    async def connect(self):
+        """Establish database connection"""
+        try:
+            {% if config.database.database_type.value == "postgresql" -%}
+            self.pool = await asyncpg.create_pool(
+                settings.DATABASE_URL,
+                min_size=settings.DB_POOL_SIZE // 4,
+                max_size=settings.DB_POOL_SIZE,
+                command_timeout=settings.DB_TIMEOUT,
+            )
+            logger.info("PostgreSQL connection pool established")
+            {% elif config.database.database_type.value == "mongodb" -%}
+            self.client = AsyncIOMotorClient(
+                settings.DATABASE_URL,
+                maxPoolSize=settings.DB_POOL_SIZE,
+                serverSelectionTimeoutMS=settings.DB_TIMEOUT * 1000,
+            )
+            self.db = self.client[settings.DATABASE_NAME]
+            # Verify connection
+            await self.client.admin.command('ping')
+            logger.info("MongoDB connection established")
+            {% elif config.database.database_type.value == "redis" -%}
+            self.redis = await aioredis.from_url(
+                settings.REDIS_URL,
+                max_connections=settings.DB_POOL_SIZE,
+            )
+            logger.info("Redis connection established")
+            {% elif config.database.database_type.value == "in_memory" -%}
+            self.connected = True
+            logger.info("In-memory database initialized")
+            {% endif -%}
+            
+            DB_CONNECTIONS_ACTIVE.set(settings.DB_POOL_SIZE)
+        
+        except Exception as e:
+            logger.error(f"Database connection failed: {e}")
+            raise DatabaseError(f"Failed to connect to database: {e}", "connect")
+    
+    async def disconnect(self):
+        """Close database connections"""
+        try:
+            {% if config.database.database_type.value == "postgresql" -%}
+            if self.pool:
+                await self.pool.close()
+                logger.info("PostgreSQL connection pool closed")
+            {% elif config.database.database_type.value == "mongodb" -%}
+            if self.client:
+                self.client.close()
+                logger.info("MongoDB connection closed")
+            {% elif config.database.database_type.value == "redis" -%}
+            if self.redis:
+                await self.redis.close()
+                logger.info("Redis connection closed")
+            {% elif config.database.database_type.value == "in_memory" -%}
+            self.connected = False
+            self.data.clear()
+            logger.info("In-memory database cleared")
+            {% endif -%}
+            
+            DB_CONNECTIONS_ACTIVE.set(0)
+        
+        except Exception as e:
+            logger.error(f"Error during database disconnect: {e}")
+    
+    async def is_connected(self) -> bool:
+        """Check if database is connected"""
+        try:
+            {% if config.database.database_type.value == "postgresql" -%}
+            if not self.pool:
+                return False
+            async with self.pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            return True
+            {% elif config.database.database_type.value == "mongodb" -%}
+            if not self.client:
+                return False
+            await self.client.admin.command('ping')
+            return True
+            {% elif config.database.database_type.value == "redis" -%}
+            if not self.redis:
+                return False
+            await self.redis.ping()
+            return True
+            {% elif config.database.database_type.value == "in_memory" -%}
+            return self.connected
+            {% endif -%}
+        except Exception:
+            return False
+
+
+# Global database instance
+database = Database()
+
+
+{% if config.database.enable_migrations -%}
+async def run_migrations():
+    """Run database migrations"""
+    from .migrations import apply_migrations
+    await apply_migrations(database)
+
+
+async def check_migrations() -> bool:
+    """Check if migrations are up to date"""
+    # Implementation depends on migration strategy
+    return True
+{% endif -%}
+
+
+class BaseRepository:
+    """Base repository with common database operations"""
+    
+    def __init__(self):
+        self.db = database
+    
+    async def _execute_with_metrics(self, operation: str, func):
+        """Execute database operation with metrics"""
+        start_time = time.time()
+        try:
+            result = await func()
+            duration = time.time() - start_time
+            DB_QUERY_DURATION.labels(operation=operation).observe(duration)
+            return result
+        except Exception as e:
+            DB_ERRORS.labels(operation=operation, error_type=type(e).__name__).inc()
+            raise
+
+
+class ItemRepository(BaseRepository):
+    """Item repository"""
+    
+    {% if config.database.database_type.value == "postgresql" -%}
+    async def list(self, offset: int = 0, limit: int = 20) -> Tuple[List[Item], int]:
+        """List items with pagination"""
+        async def _query():
+            async with self.db.pool.acquire() as conn:
+                # Get total count
+                total = await conn.fetchval("SELECT COUNT(*) FROM items")
+                
+                # Get items
+                rows = await conn.fetch(
+                    """
+                    SELECT id, name, description, created_at, updated_at
+                    FROM items
+                    ORDER BY created_at DESC
+                    LIMIT $1 OFFSET $2
+                    """,
+                    limit, offset
+                )
+                
+                items = [Item(**dict(row)) for row in rows]
+                return items, total
+        
+        return await self._execute_with_metrics("list", _query)
+    
+    async def get(self, item_id: UUID) -> Optional[Item]:
+        """Get item by ID"""
+        async def _query():
+            async with self.db.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, name, description, created_at, updated_at
+                    FROM items
+                    WHERE id = $1
+                    """,
+                    item_id
+                )
+                return Item(**dict(row)) if row else None
+        
+        return await self._execute_with_metrics("get", _query)
+    
+    async def create(self, item: Item) -> Item:
+        """Create item"""
+        async def _query():
+            async with self.db.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO items (id, name, description, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    item.id, item.name, item.description, item.created_at, item.updated_at
+                )
+                return item
+        
+        return await self._execute_with_metrics("create", _query)
+    
+    async def update(self, item_id: UUID, updates: Dict[str, Any]) -> Item:
+        """Update item"""
+        async def _query():
+            set_clauses = []
+            values = []
+            for i, (key, value) in enumerate(updates.items(), start=1):
+                set_clauses.append(f"{key} = ${i}")
+                values.append(value)
+            
+            values.append(item_id)
+            
+            async with self.db.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE items
+                    SET {', '.join(set_clauses)}
+                    WHERE id = ${len(values)}
+                    RETURNING id, name, description, created_at, updated_at
+                    """,
+                    *values
+                )
+                return Item(**dict(row)) if row else None
+        
+        return await self._execute_with_metrics("update", _query)
+    
+    async def delete(self, item_id: UUID) -> None:
+        """Delete item"""
+        async def _query():
+            async with self.db.pool.acquire() as conn:
+                await conn.execute("DELETE FROM items WHERE id = $1", item_id)
+        
+        await self._execute_with_metrics("delete", _query)
+    
+    {% elif config.database.database_type.value == "in_memory" -%}
+    async def list(self, offset: int = 0, limit: int = 20) -> Tuple[List[Item], int]:
+        """List items with pagination"""
+        items_list = list(self.db.data.get("items", {}).values())
+        items_list.sort(key=lambda x: x.created_at, reverse=True)
+        total = len(items_list)
+        paginated = items_list[offset:offset + limit]
+        return paginated, total
+    
+    async def get(self, item_id: UUID) -> Optional[Item]:
+        """Get item by ID"""
+        return self.db.data.get("items", {}).get(str(item_id))
+    
+    async def create(self, item: Item) -> Item:
+        """Create item"""
+        if "items" not in self.db.data:
+            self.db.data["items"] = {}
+        self.db.data["items"][str(item.id)] = item
+        return item
+    
+    async def update(self, item_id: UUID, updates: Dict[str, Any]) -> Item:
+        """Update item"""
+        item = await self.get(item_id)
+        if item:
+            for key, value in updates.items():
+                setattr(item, key, value)
+        return item
+    
+    async def delete(self, item_id: UUID) -> None:
+        """Delete item"""
+        self.db.data.get("items", {}).pop(str(item_id), None)
+    {% endif -%}
