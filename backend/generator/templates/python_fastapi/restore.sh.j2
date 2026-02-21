@@ -1,0 +1,51 @@
+#!/bin/bash
+# Database restore script for {{ service_name }}
+
+set -e
+
+if [ -z "$1" ]; then
+    echo "Usage: $0 <backup_file>"
+    exit 1
+fi
+
+BACKUP_FILE="$1"
+DATABASE_NAME="{{ service_name_snake }}"
+
+if [ ! -f "${BACKUP_FILE}" ]; then
+    echo "ERROR: Backup file not found: ${BACKUP_FILE}"
+    exit 1
+fi
+
+echo "WARNING: This will restore the database from backup."
+echo "Current database will be overwritten!"
+read -p "Are you sure you want to continue? (yes/no): " CONFIRM
+
+if [ "${CONFIRM}" != "yes" ]; then
+    echo "Restore cancelled."
+    exit 0
+fi
+
+echo "Starting restore from ${BACKUP_FILE}..."
+
+{% if config.database.database_type.value == "postgresql" -%}
+# PostgreSQL restore
+if [[ "${BACKUP_FILE}" == *.gz ]]; then
+    gunzip -c "${BACKUP_FILE}" | psql ${DATABASE_URL}
+else
+    psql ${DATABASE_URL} < "${BACKUP_FILE}"
+fi
+
+{% elif config.database.database_type.value == "mongodb" -%}
+# MongoDB restore
+if [[ "${BACKUP_FILE}" == *.tar.gz ]]; then
+    TEMP_DIR=$(mktemp -d)
+    tar -xzf "${BACKUP_FILE}" -C "${TEMP_DIR}"
+    mongorestore --uri="${DATABASE_URL}" --db="${DATABASE_NAME}" "${TEMP_DIR}/${DATABASE_NAME}"
+    rm -rf "${TEMP_DIR}"
+else
+    mongorestore --uri="${DATABASE_URL}" --db="${DATABASE_NAME}" "${BACKUP_FILE}"
+fi
+
+{% endif -%}
+
+echo "Restore completed successfully"

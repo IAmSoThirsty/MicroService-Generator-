@@ -1,0 +1,75 @@
+"""
+Database migration: Initial schema
+
+Revision: 001
+Created: {{ version }}
+"""
+
+{% if config.database.database_type.value == "postgresql" -%}
+import asyncpg
+
+async def upgrade(connection: asyncpg.Connection):
+    """Forward migration"""
+    # Create items table
+    await connection.execute("""
+        CREATE TABLE IF NOT EXISTS items (
+            id UUID PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            description TEXT,
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+        )
+    """)
+    
+    # Create indexes
+    await connection.execute("""
+        CREATE INDEX IF NOT EXISTS idx_items_created_at ON items(created_at DESC)
+    """)
+    
+    # Create migration tracking table
+    await connection.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+        )
+    """)
+    
+    # Record migration
+    await connection.execute("""
+        INSERT INTO schema_migrations (version, applied_at)
+        VALUES (1, NOW())
+        ON CONFLICT (version) DO NOTHING
+    """)
+
+
+async def downgrade(connection: asyncpg.Connection):
+    """Reverse migration"""
+    await connection.execute("DROP TABLE IF EXISTS items CASCADE")
+    await connection.execute("DELETE FROM schema_migrations WHERE version = 1")
+
+{% elif config.database.database_type.value == "mongodb" -%}
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
+async def upgrade(db: AsyncIOMotorDatabase):
+    """Forward migration"""
+    # Create collections
+    await db.create_collection("items")
+    
+    # Create indexes
+    await db.items.create_index("created_at", name="idx_items_created_at")
+    await db.items.create_index("name", name="idx_items_name")
+    
+    # Create migrations tracking collection
+    await db.create_collection("schema_migrations")
+    await db.schema_migrations.insert_one({
+        "version": 1,
+        "applied_at": datetime.utcnow()
+    })
+
+
+async def downgrade(db: AsyncIOMotorDatabase):
+    """Reverse migration"""
+    await db.items.drop()
+    await db.schema_migrations.delete_one({"version": 1})
+
+{% endif -%}

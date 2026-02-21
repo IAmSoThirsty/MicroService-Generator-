@@ -1,0 +1,110 @@
+#!/usr/bin/env python
+"""
+Database integrity check script for {{ service_name }}
+"""
+import asyncio
+import sys
+from typing import List, Tuple
+
+{% if config.database.database_type.value == "postgresql" -%}
+import asyncpg
+
+async def check_integrity():
+    """Check database integrity"""
+    errors: List[str] = []
+    
+    # Connect to database
+    conn = await asyncpg.connect("{{ '${DATABASE_URL}' }}")
+    
+    try:
+        # Check for foreign key violations
+        result = await conn.fetch("""
+            SELECT conname, conrelid::regclass, confrelid::regclass
+            FROM pg_constraint
+            WHERE contype = 'f'
+        """)
+        
+        for row in result:
+            violations = await conn.fetch(f"""
+                SELECT * FROM {row['conrelid']}
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM {row['confrelid']}
+                )
+            """)
+            if violations:
+                errors.append(f"Foreign key violation in {row['conname']}: {len(violations)} rows")
+        
+        # Check for orphaned records in items table
+        orphaned = await conn.fetchval("""
+            SELECT COUNT(*) FROM items WHERE id IS NULL
+        """)
+        if orphaned > 0:
+            errors.append(f"Found {orphaned} items with NULL id")
+        
+        # Check for duplicate IDs
+        duplicates = await conn.fetch("""
+            SELECT id, COUNT(*) FROM items
+            GROUP BY id HAVING COUNT(*) > 1
+        """)
+        if duplicates:
+            errors.append(f"Found {len(duplicates)} duplicate IDs in items table")
+        
+    finally:
+        await conn.close()
+    
+    return errors
+
+{% elif config.database.database_type.value == "mongodb" -%}
+from motor.motor_asyncio import AsyncIOMotorClient
+
+async def check_integrity():
+    """Check database integrity"""
+    errors: List[str] = []
+    
+    # Connect to database
+    client = AsyncIOMotorClient("{{ '${DATABASE_URL}' }}")
+    db = client["{{ service_name_snake }}"]
+    
+    try:
+        # Check for documents without required fields
+        missing_id = await db.items.count_documents({"id": {"$exists": False}})
+        if missing_id > 0:
+            errors.append(f"Found {missing_id} items without id field")
+        
+        missing_name = await db.items.count_documents({"name": {"$exists": False}})
+        if missing_name > 0:
+            errors.append(f"Found {missing_name} items without name field")
+        
+        # Check for duplicate IDs
+        pipeline = [
+            {"$group": {"_id": "$id", "count": {"$sum": 1}}},
+            {"$match": {"count": {"$gt": 1}}}
+        ]
+        duplicates = await db.items.aggregate(pipeline).to_list(None)
+        if duplicates:
+            errors.append(f"Found {len(duplicates)} duplicate IDs in items collection")
+        
+    finally:
+        client.close()
+    
+    return errors
+
+{% endif -%}
+
+async def main():
+    print("Running database integrity checks...")
+    
+    errors = await check_integrity()
+    
+    if errors:
+        print("\n❌ Integrity check FAILED:")
+        for error in errors:
+            print(f"  - {error}")
+        sys.exit(1)
+    else:
+        print("\n✅ Integrity check PASSED: No issues found")
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
