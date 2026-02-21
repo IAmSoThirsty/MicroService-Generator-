@@ -1,0 +1,317 @@
+name: CD Pipeline
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+
+env:
+  SERVICE_NAME: {{ service_name_snake }}
+
+jobs:
+  # Deploy to Dev (automatic after CI passes)
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    if: {% raw %}${{ github.event.workflow_run.conclusion == 'success' || github.event.inputs.environment == 'dev' }}{% endraw %}
+    environment:
+      name: dev
+      url: https://{{ service_name_snake }}-dev.example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+      
+      - name: Configure kubectl
+        run: |
+          echo "{% raw %}${{ secrets.KUBECONFIG_DEV }}{% endraw %}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+      
+      - name: Get image digest
+        id: digest
+        run: |
+          IMAGE_DIGEST=$(docker manifest inspect \
+            ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}:{% raw %}${{ github.sha }}{% endraw %} \
+            | jq -r '.digest')
+          echo "digest=$IMAGE_DIGEST" >> $GITHUB_OUTPUT
+      
+      {% if config.cicd.enable_signing -%}
+      - name: Verify image signature
+        run: |
+          cosign verify \
+            ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}@{% raw %}${{ steps.digest.outputs.digest }}{% endraw %} \
+            --certificate-identity-regexp={% raw %}'.*'{% endraw %} \
+            --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+      {% endif -%}
+      
+      - name: Deploy to Kubernetes
+        run: |
+          export IMAGE="ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}@{% raw %}${{ steps.digest.outputs.digest }}{% endraw %}"
+          
+          # Update deployment with new image
+          kubectl set image deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} \
+            {% raw %}${{ env.SERVICE_NAME }}{% endraw %}=$IMAGE \
+            -n dev
+          
+          # Wait for rollout
+          kubectl rollout status deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} \
+            -n dev \
+            --timeout=5m
+      
+      - name: Run smoke tests
+        run: |
+          # Wait for service to be ready
+          kubectl wait --for=condition=ready pod \
+            -l app={% raw %}${{ env.SERVICE_NAME }}{% endraw %} \
+            -n dev \
+            --timeout=2m
+          
+          # Get service URL
+          SERVICE_URL=$(kubectl get service {% raw %}${{ env.SERVICE_NAME }}{% endraw %} -n dev -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          
+          # Health check
+          curl -f http://$SERVICE_URL/health || exit 1
+          
+          # Basic API test
+          curl -f http://$SERVICE_URL{{ config.metadata.api_prefix }}/items \
+            -H "{{ config.security.api_key_header }}: {% raw %}${{ secrets.API_KEY_DEV }}{% endraw %}" \
+            || exit 1
+      
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          kubectl rollout undo deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} -n dev
+          kubectl rollout status deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} -n dev
+  
+  # Deploy to Staging (manual approval)
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    if: {% raw %}${{ github.event.inputs.environment == 'staging' || github.event.inputs.environment == '' }}{% endraw %}
+    environment:
+      name: staging
+      url: https://{{ service_name_snake }}-staging.example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+      
+      - name: Configure kubectl
+        run: |
+          echo "{% raw %}${{ secrets.KUBECONFIG_STAGING }}{% endraw %}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+      
+      - name: Get image digest
+        id: digest
+        run: |
+          IMAGE_DIGEST=$(docker manifest inspect \
+            ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}:{% raw %}${{ github.sha }}{% endraw %} \
+            | jq -r '.digest')
+          echo "digest=$IMAGE_DIGEST" >> $GITHUB_OUTPUT
+      
+      {% if config.cicd.enable_signing -%}
+      - name: Verify image signature
+        run: |
+          cosign verify \
+            ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}@{% raw %}${{ steps.digest.outputs.digest }}{% endraw %} \
+            --certificate-identity-regexp='.*' \
+            --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+      {% endif -%}
+      
+      {% if config.database.enable_migrations -%}
+      - name: Run database migrations
+        run: |
+          kubectl create job migration-{% raw %}${{ github.run_number }}{% endraw %} \
+            --from=cronjob/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}-migrations \
+            -n staging
+          
+          kubectl wait --for=condition=complete job/migration-{% raw %}${{ github.run_number }}{% endraw %} \
+            -n staging \
+            --timeout=5m
+      {% endif -%}
+      
+      - name: Deploy to Kubernetes
+        run: |
+          export IMAGE="ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}@{% raw %}${{ steps.digest.outputs.digest }}{% endraw %}"
+          
+          kubectl set image deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} \
+            {% raw %}${{ env.SERVICE_NAME }}{% endraw %}=$IMAGE \
+            -n staging
+          
+          kubectl rollout status deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} \
+            -n staging \
+            --timeout=5m
+      
+      - name: Run integration tests
+        run: |
+          kubectl wait --for=condition=ready pod \
+            -l app={% raw %}${{ env.SERVICE_NAME }}{% endraw %} \
+            -n staging \
+            --timeout=2m
+          
+          # Run full integration test suite
+          # Add your integration test commands here
+      
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          kubectl rollout undo deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} -n staging
+          {% if config.database.enable_migrations -%}
+          # Run rollback migration
+          kubectl create job migration-rollback-{% raw %}${{ github.run_number }}{% endraw %} \
+            --from=cronjob/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}-migration-rollback \
+            -n staging
+          {% endif -%}
+  
+  # Deploy to Production (manual approval + strict checks)
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: {% raw %}${{ github.event.inputs.environment == 'production' }}{% endraw %}
+    environment:
+      name: production
+      url: https://{{ service_name_snake }}.example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Validate semantic version
+        run: |
+          # Ensure proper version bump
+          git fetch --tags
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $LATEST_TAG"
+          # Add version validation logic
+      
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+      
+      - name: Configure kubectl
+        run: |
+          echo "{% raw %}${{ secrets.KUBECONFIG_PROD }}{% endraw %}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+      
+      - name: Get image digest
+        id: digest
+        run: |
+          IMAGE_DIGEST=$(docker manifest inspect \
+            ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}:{% raw %}${{ github.sha }}{% endraw %} \
+            | jq -r '.digest')
+          echo "digest=$IMAGE_DIGEST" >> $GITHUB_OUTPUT
+      
+      {% if config.cicd.enable_signing -%}
+      - name: Verify image signature (MANDATORY)
+        run: |
+          cosign verify \
+            ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}@{% raw %}${{ steps.digest.outputs.digest }}{% endraw %} \
+            --certificate-identity-regexp='.*' \
+            --certificate-oidc-issuer=https://token.actions.githubusercontent.com || exit 1
+      {% endif -%}
+      
+      - name: Backup current deployment
+        run: |
+          kubectl get deployment {% raw %}${{ env.SERVICE_NAME }}{% endraw %} -n production -o yaml > backup-deployment.yaml
+      
+      {% if config.database.enable_migrations -%}
+      - name: Backup database
+        run: |
+          # Trigger database backup job
+          kubectl create job db-backup-{% raw %}${{ github.run_number }}{% endraw %} \
+            --from=cronjob/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}-db-backup \
+            -n production
+          
+          kubectl wait --for=condition=complete job/db-backup-{% raw %}${{ github.run_number }}{% endraw %} \
+            -n production \
+            --timeout=10m
+      
+      - name: Run database migrations
+        run: |
+          kubectl create job migration-{% raw %}${{ github.run_number }}{% endraw %} \
+            --from=cronjob/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}-migrations \
+            -n production
+          
+          kubectl wait --for=condition=complete job/migration-{% raw %}${{ github.run_number }}{% endraw %} \
+            -n production \
+            --timeout=10m
+      {% endif -%}
+      
+      - name: Deploy to Kubernetes (Rolling Update)
+        run: |
+          export IMAGE="ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}@{% raw %}${{ steps.digest.outputs.digest }}{% endraw %}"
+          
+          # Update with strict readiness checks
+          kubectl set image deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} \
+            {% raw %}${{ env.SERVICE_NAME }}{% endraw %}=$IMAGE \
+            -n production
+          
+          # Monitor rollout with timeout
+          kubectl rollout status deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} \
+            -n production \
+            --timeout=10m
+      
+      - name: Post-deployment validation
+        run: |
+          # Wait for all pods to be ready
+          kubectl wait --for=condition=ready pod \
+            -l app={% raw %}${{ env.SERVICE_NAME }}{% endraw %} \
+            -n production \
+            --timeout=5m
+          
+          # Health check
+          SERVICE_URL=$(kubectl get service {% raw %}${{ env.SERVICE_NAME }}{% endraw %} -n production -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          curl -f https://$SERVICE_URL/health || exit 1
+          curl -f https://$SERVICE_URL/health/ready || exit 1
+          
+          # Monitor error rates for 2 minutes
+          sleep 120
+          
+          # Check Prometheus metrics for error spikes
+          # Add metrics validation here
+      
+      - name: Create Git tag
+        if: success()
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -a "v{{ version }}-{% raw %}${{ github.run_number }}{% endraw %}" -m "Production deployment"
+          git push origin --tags
+      
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Deployment failed, initiating rollback..."
+          kubectl rollout undo deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} -n production
+          kubectl rollout status deployment/{% raw %}${{ env.SERVICE_NAME }}{% endraw %} -n production
+          
+          {% if config.database.enable_migrations -%}
+          # Rollback database migrations
+          kubectl create job migration-rollback-{% raw %}${{ github.run_number }}{% endraw %} \
+            --from=cronjob/{% raw %}${{ env.SERVICE_NAME }}{% endraw %}-migration-rollback \
+            -n production
+          {% endif -%}
+          
+          # Notify team
+          echo "Production deployment rolled back"
+      
+      - name: Notify deployment status
+        if: always()
+        run: |
+          # Add notification logic (Slack, email, etc.)
+          echo "Deployment {% raw %}${{ job.status }}{% endraw %}"
