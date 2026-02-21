@@ -1,0 +1,320 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.11"
+  {% if config.database.database_type.value == "postgresql" -%}
+  DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test_db"
+  {% elif config.database.database_type.value == "mongodb" -%}
+  DATABASE_URL: "mongodb://localhost:27017"
+  DATABASE_NAME: "test_db"
+  {% endif -%}
+
+jobs:
+  # Stage 1: Build Governance
+  build:
+    name: Build & Dependency Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: {% raw %}${{ env.PYTHON_VERSION }}{% endraw %}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      {% if config.cicd.enable_sbom -%}
+      - name: Generate SBOM
+        run: |
+          pip install cyclonedx-bom
+          cyclonedx-py -r -i requirements.txt -o sbom.json
+      
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+      {% endif -%}
+      
+      - name: Verify dependency hashes
+        run: |
+          pip install pip-audit
+          pip-audit --desc
+  
+  # Stage 2: Static Analysis
+  lint:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: {% raw %}${{ env.PYTHON_VERSION }}{% endraw %}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install ruff mypy bandit black isort
+          pip install -r requirements.txt
+      
+      - name: Run Ruff (linting)
+        run: ruff check app/
+      
+      - name: Run Black (formatting check)
+        run: black --check app/
+      
+      - name: Run isort (import sorting)
+        run: isort --check-only app/
+      
+      - name: Run mypy (type checking)
+        run: mypy app/ --ignore-missing-imports
+      
+      - name: Run Bandit (security lint)
+        run: bandit -r app/ -f json -o bandit-report.json || true
+      
+      - name: Upload Bandit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+  
+  secrets-scan:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for secret scanning
+      
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+  
+  # Stage 3: Unit Testing
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: [lint, secrets-scan]
+    
+    {% if config.database.database_type.value == "postgresql" -%}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    {% elif config.database.database_type.value == "mongodb" -%}
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+    {% endif -%}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: {% raw %}${{ env.PYTHON_VERSION }}{% endraw %}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio {% if config.cicd.enable_fuzz_testing %}hypothesis{% endif %}
+      
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=term \
+            {% if config.cicd.coverage_threshold > 0 -%}
+            --cov-fail-under={{ config.cicd.coverage_threshold }} \
+            {% endif -%}
+            -v
+      
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: true
+      
+      {% if config.cicd.enable_fuzz_testing -%}
+      - name: Run fuzz tests
+        run: pytest tests/ -k fuzz -v --hypothesis-show-statistics
+      {% endif -%}
+  
+  # Stage 4: Integration Testing
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Build Docker image
+        run: docker build -t {{ service_name_snake }}:test .
+      
+      - name: Run service in container
+        run: |
+          docker run -d \
+            --name {{ service_name_snake }}_test \
+            -p {{ port }}:{{ port }} \
+            {{ service_name_snake }}:test
+      
+      - name: Wait for service startup
+        run: |
+          timeout 60 bash -c 'until curl -f http://localhost:{{ port }}/health; do sleep 2; done'
+      
+      - name: Test health endpoints
+        run: |
+          curl -f http://localhost:{{ port }}/health
+          curl -f http://localhost:{{ port }}/health/ready
+          curl -f http://localhost:{{ port }}/health/live
+      
+      - name: Test API endpoints
+        run: |
+          # Test with authentication
+          curl -f -H "{{ config.security.api_key_header }}: test-key" \
+            http://localhost:{{ port }}{{ config.metadata.api_prefix }}/items
+      
+      - name: Check service logs
+        if: always()
+        run: docker logs {{ service_name_snake }}_test
+      
+      - name: Cleanup
+        if: always()
+        run: docker rm -f {{ service_name_snake }}_test
+  
+  # Stage 5: Security Scanning
+  security-scan:
+    name: Security & Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'  # Fail on critical vulnerabilities
+      
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+      
+      - name: Build Docker image for scanning
+        run: docker build -t {{ service_name_snake }}:scan .
+      
+      - name: Run Trivy container scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '{{ service_name_snake }}:scan'
+          format: 'sarif'
+          output: 'trivy-container-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+  
+  # Stage 6: Build & Sign Artifacts
+  build-artifacts:
+    name: Build & Sign Artifacts
+    runs-on: ubuntu-latest
+    needs: [integration-test, security-scan]
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: {% raw %}${{ github.actor }}{% endraw %}
+          password: {% raw %}${{ secrets.GITHUB_TOKEN }}{% endraw %}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{{ service_name_snake }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+            type=semver,pattern={% raw %}{{version}}{% endraw %}
+      
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: {% raw %}${{ steps.meta.outputs.tags }}{% endraw %}
+          labels: {% raw %}${{ steps.meta.outputs.labels }}{% endraw %}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+      
+      {% if config.cicd.enable_signing -%}
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+      
+      - name: Sign container image
+        run: |
+          cosign sign --yes \
+            ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{{ service_name_snake }}@{% raw %}${{ steps.build.outputs.digest }}{% endraw %}
+      {% endif -%}
+      
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ghcr.io/{% raw %}${{ github.repository }}{% endraw %}/{{ service_name_snake }}
+          subject-digest: {% raw %}${{ steps.build.outputs.digest }}{% endraw %}
+          push-to-registry: true
