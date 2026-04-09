@@ -6,8 +6,6 @@
 #   docker compose up -d               # run in background
 #   docker compose down -v             # stop and remove volumes
 
-version: "3.9"
-
 services:
   app:
     build:

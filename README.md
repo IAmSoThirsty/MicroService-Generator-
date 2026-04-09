@@ -219,11 +219,11 @@ docker run --rm -p 8001:8001 \
 
 ### Download a standalone tarball (from GitHub Releases)
 
-Each tagged release publishes a self-contained Docker image tarball:
+Each tagged release publishes a self-contained Docker image tarball for linux/amd64:
 
 ```bash
 # Download the tarball from the GitHub Releases page, then:
-docker load < microservice-generator-<version>.tar.gz
+gunzip -c microservice-generator-<version>-linux-amd64.tar.gz | docker load
 docker run --rm -p 8001:8001 \
   -e MONGO_URL=mongodb://localhost:27017 \
   ghcr.io/iamsothirsty/microservice-generator:<version>
