@@ -2,6 +2,10 @@
 
 Production-grade microservices infrastructure generator — **15 components, complete pipeline**.
 
+> **📖 Canonical Architecture & Design Guide:** [`docs/GENESIS.md`](docs/GENESIS.md) — complete
+> documentation of the Genesis system: architecture, compiler pipeline, all 15 components,
+> criticality profiles, sacred-zone governance, CI/CD gates, and full API reference.
+
 ## Overview
 
 The **Genesis Microservices Generator** replaces the prior template-based generator with a unified,
@@ -134,6 +138,8 @@ curl -X POST http://localhost:8001/api/genesis/generate \
 MicroService-Generator-/
 ├── genesis.py                    # ← Canonical Genesis generator (15 components)
 ├── service-spec.yaml             # Example service specification
+├── docs/
+│   └── GENESIS.md                # ← Canonical architecture & design guide
 ├── backend/
 │   ├── server.py                 # FastAPI server (uses genesis.py)
 │   ├── requirements.txt
@@ -162,6 +168,13 @@ Files managed by Genesis may contain protected sections:
 ```
 
 Sacred zones are preserved during `regen` operations and protected by pre-commit hooks.
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| **[`docs/GENESIS.md`](docs/GENESIS.md)** | **Canonical architecture & design guide** — complete system design, compiler pipeline, all 15 components, criticality profiles, sacred-zone governance, CI/CD gate architecture, and full API reference |
+| [`service-spec.yaml`](service-spec.yaml) | Example `ServiceSpec` in YAML format |
 
 ## Development
 
