@@ -1,5 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException
 from fastapi.responses import Response, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -19,10 +20,10 @@ from generator.engine import MicroserviceGenerator
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+# MongoDB connection (defaults allow the server to start without a MongoDB instance)
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ.get('DB_NAME', 'genesis')]
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -165,6 +166,13 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Serve React production build if it exists (set by Docker or local build)
+_frontend_build = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', 'frontend', 'build')
+)
+if os.path.isdir(_frontend_build):
+    app.mount("/", StaticFiles(directory=_frontend_build, html=True), name="frontend")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

@@ -138,10 +138,13 @@ curl -X POST http://localhost:8001/api/genesis/generate \
 MicroService-Generator-/
 ├── genesis.py                    # ← Canonical Genesis generator (15 components)
 ├── service-spec.yaml             # Example service specification
+├── Dockerfile                    # Multi-stage build (frontend + backend)
+├── docker-compose.yml            # Full-stack compose (app + MongoDB)
+├── .dockerignore
 ├── docs/
 │   └── GENESIS.md                # ← Canonical architecture & design guide
 ├── backend/
-│   ├── server.py                 # FastAPI server (uses genesis.py)
+│   ├── server.py                 # FastAPI server (uses genesis.py, serves UI)
 │   ├── requirements.txt
 │   └── generator/
 │       ├── engine.py             # Delegates to genesis.py
@@ -152,7 +155,9 @@ MicroService-Generator-/
 │   ├── test_genesis.py           # Genesis generator tests
 │   └── pact/                     # Pact contract test stubs
 ├── .github/
-│   └── workflows/                # CI/CD workflows
+│   └── workflows/
+│       ├── genesis-ci.yml        # 5-gate CI pipeline
+│       └── docker-release.yml    # Docker build & GHCR release
 ├── .pre-commit-config.yaml       # Pre-commit hooks
 └── README.md
 ```
@@ -175,6 +180,62 @@ Sacred zones are preserved during `regen` operations and protected by pre-commit
 |----------|-------------|
 | **[`docs/GENESIS.md`](docs/GENESIS.md)** | **Canonical architecture & design guide** — complete system design, compiler pipeline, all 15 components, criticality profiles, sacred-zone governance, CI/CD gate architecture, and full API reference |
 | [`service-spec.yaml`](service-spec.yaml) | Example `ServiceSpec` in YAML format |
+
+## Docker Deployment
+
+The easiest way to run Genesis as a fully self-contained app (backend + React UI + all
+dependencies) is via Docker.
+
+### Quick start — docker compose (recommended)
+
+```bash
+# Clone and start the full stack (app + MongoDB)
+git clone https://github.com/IAmSoThirsty/MicroService-Generator-.git
+cd MicroService-Generator-
+docker compose up --build
+```
+
+Open **http://localhost:8001** — the React UI is served directly by the FastAPI backend.
+
+### Build the image yourself
+
+```bash
+docker build -t microservice-generator:latest .
+docker run --rm -p 8001:8001 \
+  -e MONGO_URL=mongodb://your-mongo:27017 \
+  -e DB_NAME=genesis \
+  microservice-generator:latest
+```
+
+### Pull a pre-built release from GitHub Container Registry
+
+```bash
+# Replace <version> with e.g. "v1.0.0" or use "latest"
+docker pull ghcr.io/iamsothirsty/microservice-generator:<version>
+docker run --rm -p 8001:8001 \
+  -e MONGO_URL=mongodb://your-mongo:27017 \
+  ghcr.io/iamsothirsty/microservice-generator:<version>
+```
+
+### Download a standalone tarball (from GitHub Releases)
+
+Each tagged release publishes a self-contained Docker image tarball:
+
+```bash
+# Download the tarball from the GitHub Releases page, then:
+docker load < microservice-generator-<version>.tar.gz
+docker run --rm -p 8001:8001 \
+  -e MONGO_URL=mongodb://localhost:27017 \
+  ghcr.io/iamsothirsty/microservice-generator:<version>
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MONGO_URL` | `mongodb://localhost:27017` | MongoDB connection string |
+| `DB_NAME` | `genesis` | MongoDB database name |
+| `CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins |
 
 ## Development
 
