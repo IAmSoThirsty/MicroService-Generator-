@@ -1,0 +1,27 @@
+# Example service specification for Genesis Microservices Generator
+# Run: python genesis.py generate --config service-spec.yaml
+name: my-service
+criticality: medium
+language: python
+database: postgresql
+port: 8000
+metrics_port: 9090
+namespace: my-service
+version: "1.0.0"
+description: "Example production microservice"
+author: platform-team
+github_owner: IAmSoThirsty
+github_repo: MicroService-Generator-
+vault_mount: secret
+argocd_server: argocd.example.com
+image_registry: ghcr.io
+enable_terraform: true
+enable_cicd: true
+enable_argocd: true
+enable_pact: true
+enable_drift_detection: true
+enable_pre_commit: true
+environments:
+  - dev
+  - staging
+  - production

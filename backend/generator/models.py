@@ -1,5 +1,6 @@
 """
-Configuration models for microservice generation
+Configuration models for microservice generation.
+Compatible with the Genesis Microservices Generator (genesis.py).
 """
 from pydantic import BaseModel, Field
 from typing import Literal, Optional, List

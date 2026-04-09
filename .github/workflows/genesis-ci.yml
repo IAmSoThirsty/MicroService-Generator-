@@ -1,0 +1,237 @@
+# Genesis Repository CI Pipeline
+# 5-gate pipeline for the MicroService-Generator- repository itself
+name: "Genesis — CI Pipeline"
+
+on:
+  push:
+    branches: [main, release/**]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # GATE 1 — Constitutional Validation
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  constitutional-validation:
+    name: "Gate 1 — Constitutional Validation"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: pip install pyyaml
+
+      - name: Validate genesis.py is present
+        run: |
+          test -f genesis.py && echo "✓ genesis.py present" || (echo "✗ genesis.py missing" && exit 1)
+
+      - name: Validate genesis.py syntax
+        run: python -m py_compile genesis.py && echo "✓ genesis.py syntax OK"
+
+      - name: Validate service-spec.yaml
+        run: |
+          python -c "
+          import yaml
+          with open('service-spec.yaml') as f:
+              spec = yaml.safe_load(f)
+          assert 'name' in spec, 'name required'
+          print(f'✓ service-spec.yaml valid: {spec[\"name\"]}')
+          "
+
+      - name: Validate genesis info
+        run: |
+          python -c "
+          from genesis import GenesisGenerator
+          g = GenesisGenerator()
+          info = g.info()
+          assert info['components'] == 15
+          assert info['version'] == '2.0.0'
+          print(f'✓ Genesis v{info[\"version\"]} — {info[\"components\"]} components')
+          "
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # GATE 2 — Build & Test
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  build-and-test:
+    name: "Gate 2 — Build & Test"
+    needs: constitutional-validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [genesis, backend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps (genesis)
+        if: matrix.component == 'genesis'
+        run: pip install pyyaml pytest pytest-cov
+
+      - name: Test genesis.py
+        if: matrix.component == 'genesis'
+        run: |
+          python -m pytest tests/test_genesis.py \
+            --cov=. \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            -v
+
+      - name: Install deps (backend)
+        if: matrix.component == 'backend'
+        run: |
+          pip install fastapi uvicorn pydantic pyyaml jinja2 python-dotenv motor pytest pytest-cov
+
+      - name: Lint backend
+        if: matrix.component == 'backend'
+        run: |
+          pip install flake8
+          flake8 backend/ --max-line-length=120 --exclude=__pycache__ || true
+
+      - name: Validate backend imports
+        if: matrix.component == 'backend'
+        run: |
+          python -c "from backend.generator.engine import MicroserviceGenerator; print('✓ Backend engine OK')"
+
+      - name: Upload coverage
+        if: matrix.component == 'genesis'
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # GATE 3 — Contract Validation
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  contract-validation:
+    name: "Gate 3 — Contract Validation"
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: pip install pyyaml pytest
+
+      - name: Validate generated output contracts
+        run: |
+          python -c "
+          from genesis import GenesisGenerator, ServiceSpec, Criticality
+
+          gen = GenesisGenerator()
+          for crit in Criticality:
+              spec = ServiceSpec(name='contract-test', criticality=crit)
+              files = gen.generate(spec)
+
+              # Verify all expected file types are present
+              tf_files  = [k for k in files if k.endswith('.tf')]
+              k8s_files = [k for k in files if 'kubernetes/' in k]
+              hpa_files = [k for k in files if 'hpa.yaml' in k]
+              pdb_files = [k for k in files if 'pdb.yaml' in k]
+              vault_files = [k for k in files if 'vault/policies' in k]
+              alert_files = [k for k in files if 'monitoring/rules' in k]
+
+              assert len(tf_files)  >= 30, f'{crit}: missing Terraform files'
+              assert len(k8s_files) >= 6,  f'{crit}: missing K8s files'
+              assert len(hpa_files) == 1,  f'{crit}: missing HPA'
+              assert len(pdb_files) == 1,  f'{crit}: missing PDB'
+              assert len(vault_files) >= 3, f'{crit}: missing Vault policies'
+              assert len(alert_files) == 2, f'{crit}: missing Prometheus rules'
+
+              print(f'  ✓ {crit.value}: {len(files)} files — all contracts satisfied')
+          print('✓ All criticality contracts satisfied')
+          "
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # GATE 4 — Security Scan
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  security-scan:
+    name: "Gate 4 — Security Scan"
+    needs: contract-validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Bandit (SAST)
+        run: |
+          pip install bandit
+          bandit -r backend/ genesis.py \
+            --skip B101 \
+            --format json \
+            --output bandit-report.json || true
+          echo "Bandit scan complete"
+
+      - name: Upload Bandit results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # GATE 5 — Summary
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  pipeline-summary:
+    name: "Gate 5 — Pipeline Summary"
+    needs: [constitutional-validation, build-and-test, contract-validation, security-scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Summary
+        run: |
+          echo "## Genesis Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Gate | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Gate 1: Constitutional Validation | ${{ needs.constitutional-validation.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Gate 2: Build & Test | ${{ needs.build-and-test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Gate 3: Contract Validation | ${{ needs.contract-validation.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Gate 4: Security Scan | ${{ needs.security-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
