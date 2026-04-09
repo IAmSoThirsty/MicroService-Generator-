@@ -1,52 +1,134 @@
 """
 Core microservice generator engine
+Delegates generation to the canonical Genesis Microservices Generator (genesis.py).
 """
-import os
 import io
+import sys
 import zipfile
 from pathlib import Path
 from typing import Dict, Any
-from jinja2 import Environment, FileSystemLoader, Template
+from jinja2 import Environment, FileSystemLoader
 from .models import MicroserviceConfig, Language
 import logging
 
 logger = logging.getLogger(__name__)
 
+# Make the repo root importable so that genesis.py can be used as a module
+_REPO_ROOT = Path(__file__).parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    from genesis import (
+        GenesisGenerator,
+        ServiceSpec,
+        Criticality,
+        Language as GenesisLanguage,
+        DatabaseType as GenesisDatabaseType,
+    )
+    _GENESIS_AVAILABLE = True
+except ImportError:
+    _GENESIS_AVAILABLE = False
+    logger.warning("genesis.py not found; falling back to template-based generator")
+
+
+def _map_language(lang: Language) -> "GenesisLanguage":
+    """Map backend Language enum to genesis Language enum."""
+    mapping = {
+        Language.PYTHON_FASTAPI: GenesisLanguage.PYTHON,
+        Language.GO_FIBER: GenesisLanguage.GO,
+        Language.NODEJS_NESTJS: GenesisLanguage.NODEJS,
+        Language.RUST_ACTIX: GenesisLanguage.RUST,
+    }
+    return mapping.get(lang, GenesisLanguage.PYTHON)
+
+
+def _map_database(db_type) -> "GenesisDatabaseType":
+    """Map backend DatabaseType to genesis DatabaseType."""
+    from .models import DatabaseType
+    mapping = {
+        DatabaseType.POSTGRESQL: GenesisDatabaseType.POSTGRESQL,
+        DatabaseType.MONGODB: GenesisDatabaseType.MONGODB,
+        DatabaseType.REDIS: GenesisDatabaseType.REDIS,
+        DatabaseType.IN_MEMORY: GenesisDatabaseType.NONE,
+    }
+    return mapping.get(db_type, GenesisDatabaseType.POSTGRESQL)
+
 
 class MicroserviceGenerator:
-    """Main generator class for creating production-ready microservices"""
-    
+    """
+    Main generator class for creating production-ready microservices.
+    Delegates to the Genesis Microservices Generator (genesis.py) when available,
+    falling back to the Jinja2 template-based generator otherwise.
+    """
+
     def __init__(self):
         self.templates_dir = Path(__file__).parent / "templates"
-        self.generators = {
+        if _GENESIS_AVAILABLE:
+            self._genesis = GenesisGenerator()
+            logger.info("Genesis generator active (v%s, %d components)",
+                        self._genesis.VERSION, self._genesis.COMPONENTS)
+        else:
+            self._genesis = None
+        self._legacy_generators = {
             Language.PYTHON_FASTAPI: PythonFastAPIGenerator(self.templates_dir),
-            # Language.GO_FIBER: GoFiberGenerator(self.templates_dir),
-            # Language.NODEJS_NESTJS: NodeNestJSGenerator(self.templates_dir),
-            # Language.RUST_ACTIX: RustActixGenerator(self.templates_dir),
         }
-    
+
     def generate(self, config: MicroserviceConfig) -> bytes:
         """
-        Generate a complete microservice based on configuration
-        Returns ZIP file as bytes
+        Generate a complete microservice based on configuration.
+        Returns ZIP file as bytes.
+
+        Uses the Genesis generator (genesis.py) when available; falls back
+        to the Jinja2 template-based generator for unsupported configurations.
         """
-        generator = self.generators.get(config.language)
+        logger.info("Generating microservice: %s", config.metadata.name)
+
+        if self._genesis is not None:
+            spec = ServiceSpec(
+                name=config.metadata.name,
+                language=_map_language(config.language),
+                database=_map_database(config.database.database_type),
+                port=config.metadata.port,
+                version=config.metadata.version,
+                description=config.metadata.description,
+                author=config.metadata.author,
+                enable_terraform=True,
+                enable_cicd=(config.cicd.platform.value in ("github_actions", "both")),
+                enable_argocd=True,
+                enable_pact=True,
+                enable_pre_commit=True,
+                enable_drift_detection=True,
+                criticality=Criticality.HIGH if config.kubernetes.max_replicas >= 10 else Criticality.MEDIUM,
+            )
+            logger.info("Delegating to Genesis generator v%s", self._genesis.VERSION)
+            return self._genesis.generate_zip(spec)
+
+        # Legacy Jinja2 fallback
+        generator = self._legacy_generators.get(config.language)
         if not generator:
             raise ValueError(f"Unsupported language: {config.language}")
-        
-        logger.info(f"Generating {config.language} microservice: {config.metadata.name}")
-        
-        # Generate all files
+
+        logger.info("Using legacy template generator for: %s", config.language)
         files = generator.generate_all(config)
-        
-        # Create ZIP archive
+
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for file_path, content in files.items():
                 zip_file.writestr(file_path, content)
-        
+
         zip_buffer.seek(0)
         return zip_buffer.getvalue()
+
+    def info(self) -> Dict[str, Any]:
+        """Return generator capability information."""
+        if self._genesis is not None:
+            return self._genesis.info()
+        return {
+            "name": "Maximal Microservice Generator (Legacy)",
+            "version": "1.0.0",
+            "note": "genesis.py not found; operating in legacy mode",
+        }
 
 
 class BaseGenerator:

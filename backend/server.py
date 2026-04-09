@@ -108,50 +108,45 @@ async def generate_microservice(config: MicroserviceConfig):
 
 @api_router.get("/generator/info")
 async def generator_info():
-    """Get information about the generator"""
-    return {
-        "name": "Maximal Microservice Generator",
-        "version": "1.0.0",
-        "supported_languages": [
-            {
-                "id": "python_fastapi",
-                "name": "Python + FastAPI",
-                "status": "available"
-            },
-            {
-                "id": "go_fiber",
-                "name": "Go + Fiber",
-                "status": "coming_soon"
-            },
-            {
-                "id": "nodejs_nestjs",
-                "name": "Node.js + NestJS",
-                "status": "coming_soon"
-            },
-            {
-                "id": "rust_actix",
-                "name": "Rust + Actix",
-                "status": "coming_soon"
+    """Get information about the Genesis generator"""
+    return generator.info()
+
+
+@api_router.post("/genesis/generate")
+async def genesis_generate(spec: dict):
+    """
+    Generate a complete production-ready microservice using the Genesis generator.
+
+    Accepts a ServiceSpec payload and returns a ZIP file containing all
+    generated infrastructure code (Terraform, Kubernetes, CI/CD, ArgoCD, Vault,
+    Prometheus alerts, HPA, PDB, pre-commit hooks, Pact tests, drift detection).
+    """
+    try:
+        import sys
+        from pathlib import Path
+        repo_root = Path(__file__).parent.parent
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        from genesis import GenesisGenerator, ServiceSpec as GenesisSpec
+
+        service_spec = GenesisSpec.from_dict(spec)
+        gen = GenesisGenerator()
+
+        logger.info("Genesis generate: %s (criticality=%s)", service_spec.slug, service_spec.criticality.value)
+        zip_bytes = gen.generate_zip(service_spec)
+
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename={service_spec.slug}-genesis.zip",
+                "X-Genesis-Version": gen.VERSION,
+                "X-Genesis-Components": str(gen.COMPONENTS),
             }
-        ],
-        "features": [
-            "Full CI/CD pipeline (GitHub Actions + GitLab CI)",
-            "Complete Kubernetes manifests (Deployment, Service, HPA, PDB, NetworkPolicy)",
-            "Prometheus metrics with proper cardinality control",
-            "Health checks (liveness, readiness, startup)",
-            "Security (Authentication, Authorization, Rate Limiting)",
-            "Database migrations and management scripts",
-            "Comprehensive documentation",
-            "Failure mode matrix",
-            "SBOM generation",
-            "Container image signing",
-            "85%+ test coverage requirement",
-            "Security scanning (Trivy, Bandit, Gitleaks)",
-            "Structured JSON logging",
-            "Graceful shutdown",
-            "Zero-downtime deployments"
-        ]
-    }
+        )
+    except Exception as e:
+        logger.error("Genesis generate failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Include the router in the main app
 app.include_router(api_router)

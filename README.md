@@ -1,1 +1,181 @@
-# Here are your Instructions
+# Genesis Microservices Generator
+
+Production-grade microservices infrastructure generator — **15 components, complete pipeline**.
+
+## Overview
+
+The **Genesis Microservices Generator** replaces the prior template-based generator with a unified,
+authoritative implementation covering the full infrastructure stack: Terraform, Kubernetes, CI/CD,
+ArgoCD, Vault, Prometheus, HPA, PDB, RBAC, pre-commit hooks, Pact contract tests, and drift detection.
+
+### Component Inventory
+
+| # | Component | Description |
+|---|-----------|-------------|
+| 1 | `SystemPipeline` | Orchestrates all generation phases |
+| 2 | `TerraformGenerator` | 32 files across 5 modules (namespace, deployment, RBAC, Vault, monitoring) |
+| 3 | `KubernetesGenerator` | Namespace, Deployment, Service, ConfigMap, NetworkPolicy |
+| 4 | `RBACGenerator` | ClusterRole + RoleBinding per service |
+| 5 | `VaultPolicyGenerator` | Scoped secret paths per service and environment |
+| 6 | `PrometheusAlertGenerator` | SLO burn-rate alerts calibrated to criticality |
+| 7 | `HPAGenerator` | HPA with criticality-driven min/max replicas |
+| 8 | `PDBGenerator` | PodDisruptionBudget per service |
+| 9 | `ArgoCDGenerator` | ApplicationSet with self-heal + auto-prune |
+| 10 | `CICDPipelineGenerator` | 5-gate GitHub Actions pipeline |
+| 11 | `PreCommitGenerator` | Sacred-zone integrity hooks |
+| 12 | `PactContractGenerator` | Consumer-driven contract test stubs |
+| 13 | `DriftDetectionGenerator` | Terraform + live-state drift detection |
+| 14 | `SacredZonePreserver` | Protects manually maintained sections |
+| 15 | `SurgicalRegen` | Component-level selective regeneration |
+
+### Terraform Modules (5)
+
+- **namespace** — Kubernetes namespace with ResourceQuota + LimitRange
+- **deployment** — Deployment + Service with probes and rolling updates
+- **rbac** — ServiceAccount + ClusterRole + ClusterRoleBinding
+- **vault** — Vault policy + Kubernetes auth role
+- **monitoring** — ServiceMonitor + Prometheus SLO alert rules
+
+### CI/CD Gates (5)
+
+1. **Constitutional Validation** — Schema, sacred zones, Terraform fmt, Kubernetes dry-run
+2. **Build & Test** — Language-aware matrix: lint, test (85%+ coverage), container build, SBOM, signing
+3. **Pact Contract Tests** — Provider verification against Pact Broker
+4. **Drift Detection** — `terraform plan -detailed-exitcode` + Kubernetes manifest diff
+5. **ArgoCD Deploy** — Progressive env promotion: dev → staging → production
+
+### Criticality Profiles
+
+| Criticality | HPA min | HPA max | CPU target | SLO availability | SLO p99 latency | PDB minAvailable |
+|-------------|---------|---------|------------|-----------------|-----------------|------------------|
+| low | 1 | 3 | 80% | 99.0% | 500ms | 0 |
+| medium | 2 | 6 | 70% | 99.5% | 300ms | 1 |
+| high | 3 | 10 | 65% | 99.9% | 200ms | 1 |
+| critical | 5 | 20 | 60% | 99.99% | 100ms | 2 |
+
+## Quick Start
+
+### CLI
+
+```bash
+# Generate with defaults (medium criticality, Python, PostgreSQL)
+python genesis.py generate --name my-service
+
+# Generate with full options
+python genesis.py generate \
+  --name payment-service \
+  --criticality critical \
+  --language python \
+  --database postgresql \
+  --port 8080
+
+# Generate from a spec file
+python genesis.py generate --config service-spec.yaml
+
+# Output as ZIP
+python genesis.py generate --name my-service --zip
+
+# Surgically regenerate specific components
+python genesis.py regen --config service-spec.yaml --components terraform,cicd,argocd
+
+# Check for infrastructure drift
+python genesis.py drift-check --service my-service --all-envs
+
+# Validate sacred zone integrity (use in CI)
+python genesis.py validate-sacred --base-ref origin/main
+
+# Show generator info
+python genesis.py info
+```
+
+### Python API
+
+```python
+from genesis import GenesisGenerator, ServiceSpec, Criticality, Language
+
+gen = GenesisGenerator()
+
+spec = ServiceSpec(
+    name="payment-service",
+    criticality=Criticality.CRITICAL,
+    language=Language.PYTHON,
+    port=8080,
+    github_owner="IAmSoThirsty",
+)
+
+# Generate all files to disk
+written = gen.write_to_disk(spec, output_dir="./output")
+
+# Generate as ZIP bytes (e.g. for API response)
+zip_bytes = gen.generate_zip(spec)
+```
+
+### REST API
+
+The FastAPI backend exposes these endpoints:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/generate` | Legacy generate (MicroserviceConfig payload) |
+| `POST` | `/api/genesis/generate` | Genesis generate (ServiceSpec payload) |
+| `GET` | `/api/generator/info` | Generator capabilities and metadata |
+
+```bash
+# Genesis generate
+curl -X POST http://localhost:8001/api/genesis/generate \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-service", "criticality": "high", "language": "python"}' \
+  -o my-service-genesis.zip
+```
+
+## Repository Structure
+
+```
+MicroService-Generator-/
+├── genesis.py                    # ← Canonical Genesis generator (15 components)
+├── service-spec.yaml             # Example service specification
+├── backend/
+│   ├── server.py                 # FastAPI server (uses genesis.py)
+│   ├── requirements.txt
+│   └── generator/
+│       ├── engine.py             # Delegates to genesis.py
+│       ├── models.py             # Pydantic models
+│       └── templates/            # Legacy Jinja2 templates (fallback)
+├── frontend/                     # React UI
+├── tests/
+│   ├── test_genesis.py           # Genesis generator tests
+│   └── pact/                     # Pact contract test stubs
+├── .github/
+│   └── workflows/                # CI/CD workflows
+├── .pre-commit-config.yaml       # Pre-commit hooks
+└── README.md
+```
+
+## Sacred Zones
+
+Files managed by Genesis may contain protected sections:
+
+```python
+# <<<SACRED_ZONE_BEGIN>>> custom-logic
+# Your manually maintained code here
+# <<<SACRED_ZONE_END>>>
+```
+
+Sacred zones are preserved during `regen` operations and protected by pre-commit hooks.
+
+## Development
+
+```bash
+# Install dependencies
+pip install -r backend/requirements.txt
+
+# Run tests
+pytest tests/ -v
+
+# Start API server
+cd backend && uvicorn server:app --reload --port 8001
+
+# Run genesis CLI
+python genesis.py info
+```
+
