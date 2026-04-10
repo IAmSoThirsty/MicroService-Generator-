@@ -1,0 +1,41 @@
+# Genesis Microservices Generator — docker-compose stack
+# Brings up the app together with a MongoDB instance.
+#
+# Usage:
+#   docker compose up --build          # build image and start
+#   docker compose up -d               # run in background
+#   docker compose down -v             # stop and remove volumes
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: genesis-microservice-generator:latest
+    ports:
+      - "8001:8001"
+    environment:
+      MONGO_URL: mongodb://mongodb:27017
+      DB_NAME: genesis
+      CORS_ORIGINS: "*"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:

@@ -1,0 +1,45 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# ---- Node / frontend ----
+frontend/node_modules/
+frontend/.cache/
+# NOTE: frontend/build is intentionally NOT ignored here so the
+# multi-stage build copies the compiled bundle correctly.
+
+# ---- Tests / coverage ----
+.pytest_cache/
+.coverage
+coverage.xml
+test_reports/
+htmlcov/
+
+# ---- Git / CI ----
+.git/
+.github/
+.gitconfig
+.gitignore
+.pre-commit-config.yaml
+
+# ---- IDE / editor ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*.DS_Store
+
+# ---- Misc ----
+memory/
+docs/
+*.md
