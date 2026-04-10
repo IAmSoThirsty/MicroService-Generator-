@@ -136,6 +136,7 @@ curl -X POST http://localhost:8001/api/genesis/generate \
 
 ```
 MicroService-Generator-/
+├── run.sh                        # ← One-command build & run (logically gated)
 ├── genesis.py                    # ← Canonical Genesis generator (15 components)
 ├── service-spec.yaml             # Example service specification
 ├── Dockerfile                    # Multi-stage build (frontend + backend)
@@ -180,6 +181,48 @@ Sacred zones are preserved during `regen` operations and protected by pre-commit
 |----------|-------------|
 | **[`docs/GENESIS.md`](docs/GENESIS.md)** | **Canonical architecture & design guide** — complete system design, compiler pipeline, all 15 components, criticality profiles, sacred-zone governance, CI/CD gate architecture, and full API reference |
 | [`service-spec.yaml`](service-spec.yaml) | Example `ServiceSpec` in YAML format |
+
+## One-Command Deployment
+
+```bash
+./run.sh
+```
+
+That's it. The script is **logically gated** — every prerequisite, path, port, build step, and
+health check must pass before the next one starts. If anything is wrong, it stops immediately with
+a clear message telling you exactly what failed and how to fix it.
+
+```
+Gate 0 — Preflight      Bash 4+, Docker daemon, docker compose plugin
+Gate 1 — Repo integrity All required source files present
+Gate 2 — Port check     Ports 8001 and 27017 are free
+Gate 3 — Build          docker compose build (multi-stage: frontend + backend)
+Gate 4 — Launch & wait  Containers started; health-check loop with timeout
+Gate 5 — Smoke tests    /api/ and /api/generator/info return HTTP 200
+```
+
+Once all five gates pass the terminal prints:
+
+```
+  ✓  Genesis Microservices Generator is UP
+
+     App  →  http://localhost:8001
+     API  →  http://localhost:8001/api/
+     Docs →  http://localhost:8001/api/docs
+```
+
+### Sub-commands
+
+| Command | Action |
+|---------|--------|
+| `./run.sh` | build + start (default) |
+| `./run.sh --stop` | stop all services and remove containers |
+| `./run.sh --clean` | stop + remove volumes + prune build cache |
+| `./run.sh --logs` | tail live logs from the running stack |
+| `./run.sh --status` | print container health status |
+| `./run.sh --help` | usage message |
+
+---
 
 ## Docker Deployment
 
